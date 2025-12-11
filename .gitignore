@@ -6,6 +6,12 @@
 /pkg/
 /spec/reports/
 /tmp/
+.idea/
+.vscode/
 
 # rspec failure tracking
 .rspec_status
+
+lib/pulsar/internal/proto/*_pb.rb
+
+Gemfile.lock
