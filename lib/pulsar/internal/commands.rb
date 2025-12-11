@@ -131,6 +131,9 @@ module Pulsar
             buffer.skip(remaining)
           end
 
+          # TODO: use better logger
+          puts "#{Time.now} [Pulsar::Internal::Commands#decode_frame] Decoded Frame: #{result.inspect}"
+
           result
         end
 
