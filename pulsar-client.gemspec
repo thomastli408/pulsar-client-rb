@@ -11,5 +11,6 @@ Gem::Specification.new do |spec|
   spec.license       = "MIT"
   spec.required_ruby_version = Gem::Requirement.new(">= 2.3.0")
 
-  spec.add_dependency 'google-protobuf', '~> 3.25'
+  spec.add_runtime_dependency 'google-protobuf', '~> 3.25'
+  spec.add_runtime_dependency "digest-crc", "~> 0.6"
 end
