@@ -7,6 +7,9 @@ require_relative "internal/checksum"
 require_relative "internal/commands"
 require_relative "internal/connection"
 require_relative "internal/connection_pool"
+require_relative "internal/service_url"
+require_relative "internal/topic_name"
+require_relative "internal/lookup_service"
 
 module Pulsar
   # Main module for the Pulsar Ruby client
