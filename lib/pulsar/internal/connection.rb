@@ -173,6 +173,16 @@ module Pulsar
         send_frame(Commands.encode_command(base_command))
       end
 
+      # Send raw frame bytes without encoding
+      # Used for message sending where we already have the encoded frame
+      # @param frame_bytes [String] pre-encoded frame bytes
+      # @return [void]
+      # @raise [ConnectionClosedError] if connection is closed
+      def send_command_raw(frame_bytes)
+        ensure_ready!
+        send_frame(frame_bytes)
+      end
+
       # Send a request and wait for response
       # @param base_command [Proto::BaseCommand] command to send
       # @param timeout [Integer] timeout in seconds
@@ -335,8 +345,15 @@ module Pulsar
             # Process complete frames
             process_frames
           rescue IO::WaitReadable
-            IO.select([@socket], nil, nil, 1)
-          rescue EOFError, IOError, Errno::ECONNRESET => e
+            # Check if socket is still valid before selecting
+            break if @socket.closed? || @state == State::CLOSED || @state == State::CLOSING
+
+            begin
+              IO.select([@socket], nil, nil, 1)
+            rescue Errno::EBADF
+              break
+            end
+          rescue EOFError, IOError, Errno::ECONNRESET, Errno::EBADF => e
             handle_connection_error(e)
             break
           rescue => e

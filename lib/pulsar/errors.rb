@@ -31,6 +31,9 @@ module Pulsar
   # Raised when handshake with broker fails
   class HandshakeError < ConnectionError; end
 
+  # Raised when a send operation times out
+  class SendTimeoutError < TimeoutError; end
+
   # Raised when the broker returns an error response
   class BrokerError < Error
     attr_reader :error_code, :error_message
