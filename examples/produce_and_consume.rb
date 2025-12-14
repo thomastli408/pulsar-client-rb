@@ -1,13 +1,11 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Example: Create a consumer and receive messages
+# Example: Produce and consume messages using Pulsar::Client
 #
 # Usage:
-#   PULSAR_URL=pulsar://localhost:6650 bundle exec ruby examples/receive_message.rb
+#   PULSAR_URL=pulsar://localhost:6650 bundle exec ruby examples/produce_and_consume.rb
 #
-# To produce messages, run in another terminal:
-#   bundle exec ruby examples/send_message.rb
 
 require_relative "../lib/pulsar/client"
 
@@ -17,58 +15,67 @@ subscription = ARGV[1] || "test-subscription"
 
 puts "Connecting to Pulsar at #{pulsar_url}..."
 
-# Create the required components
-service_url = Pulsar::Internal::ServiceUrl.new(pulsar_url)
-connection_pool = Pulsar::Internal::ConnectionPool.new
-lookup_service = Pulsar::Internal::LookupService.new(connection_pool, service_url)
+# Create the Pulsar client
+client = Pulsar::Client.new(pulsar_url)
 
 begin
-  message_count = 0
+  total_message_count = 5
+  consumed_message_count = 0
+  consumer_count = 2
+  consumer_mutex = Mutex.new
 
   threads = []
 
+  # Producer thread
   threads << Thread.new do
-    producer = Pulsar::Producer.new(
-      connection_pool: connection_pool,
-      lookup_service: lookup_service,
-      topic: topic
-    )
+    producer = client.create_producer(topic)
     puts "Producer created: #{producer.name}"
 
-    5.times do |i|
+    total_message_count.times do |i|
       msg = Pulsar::ProducerMessage.new(payload: "Message #{i + 1} from producer")
       mid = producer.send(msg)
       puts "Sent message #{i + 1}: #{mid}"
       sleep 1 + rand(3)
     end
+
+    producer.close
   end
 
-  2.times do
+  # Consumer threads
+  consumer_count.times do
     threads << Thread.new do
-      consumer = Pulsar::Consumer.new(
-        connection_pool: connection_pool,
-        lookup_service: lookup_service,
-        topic: topic,
-        subscription: subscription,
-        options: {
-          subscription_type: :shared,
-          initial_position: :earliest
-        }
-      )
+      consumer = client.subscribe(topic, subscription, {
+        subscription_type: :shared,
+        initial_position: :earliest
+      })
       puts "Consumer created: #{consumer.consumer_id}"
 
       loop do
-        # Receive with 5 second timeout
-        message = consumer.receive(timeout: nil)
+        done = consumer_mutex.synchronize do
+          puts "Consumer #{consumer.consumer_id} checking consumed count: #{consumed_message_count}/#{total_message_count}"
+          consumed_message_count >= total_message_count
+        end
+        if done
+          puts "All messages consumed, exiting consumer #{consumer.consumer_id}."
+          break
+        end
+
+        begin
+          message = consumer.receive(timeout: 1)
+        rescue Pulsar::TimeoutError
+          message = nil
+        end
 
         if message.nil?
           puts "No message received (timeout), waiting..."
           next
         end
 
-        message_count += 1
+        consumer_mutex.synchronize do
+          consumed_message_count += 1
+        end
 
-        puts "=== Message #{message_count} Received by Consumer #{consumer.consumer_id} ==="
+        puts "=== Message #{consumed_message_count} Received by Consumer #{consumer.consumer_id} ==="
         puts "  Message ID: #{message.message_id}"
         puts "  Payload: #{message.data}"
         puts "  Producer: #{message.producer_name}"
@@ -106,11 +113,7 @@ rescue => e
   puts e.backtrace.first(10).join("\n")
   exit 1
 ensure
-  if defined?(consumer) && consumer
-    puts "Closing consumer..."
-    consumer.close
-    puts "Consumer closed."
-  end
-  connection_pool.close_all
-  puts "Connection pool closed."
+  puts "Closing client..."
+  client.close
+  puts "Client closed."
 end

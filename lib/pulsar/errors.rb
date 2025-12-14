@@ -4,6 +4,9 @@ module Pulsar
   # Base error class for all Pulsar client errors
   class Error < StandardError; end
 
+  # Raised when a client operation fails
+  class ClientError < Error; end
+
   # Raised when connection to the broker fails
   class ConnectionError < Error; end
 

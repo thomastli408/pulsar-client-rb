@@ -2,7 +2,7 @@ require_relative 'lib/pulsar/client/version'
 
 Gem::Specification.new do |spec|
   spec.name          = "pulsar-client"
-  spec.version       = Pulsar::Client::VERSION
+  spec.version       = Pulsar::VERSION
   spec.authors       = ["Thomas Li"]
   spec.email         = ["thomas.li@shoplineapp.com"]
 

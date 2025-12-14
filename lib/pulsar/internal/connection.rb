@@ -51,7 +51,7 @@ module Pulsar
       end
 
       # Client version string sent in CONNECT command
-      CLIENT_VERSION = "Pulsar Ruby Client #{Pulsar::Client::VERSION}"
+      CLIENT_VERSION = "Pulsar Ruby Client #{Pulsar::VERSION}"
 
       # @return [String] broker host
       attr_reader :host
