@@ -458,6 +458,7 @@ client.close
 
 ## Current Limitations
 
+- Partitioned topic support is not yet implemented
 - TLS/SSL connections are not yet supported (only `pulsar://` URLs)
 - Async send is not yet exposed (internally used, but API is sync-only)
 - Reader API is not yet implemented
