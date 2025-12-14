@@ -365,7 +365,9 @@ client.close
 
 ## Development
 
-After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
+After checking out the repo, run `bin/setup` to install dependencies. 
+Then, run `rake spec` to run the tests. '
+You can also run `bin/console` for an interactive prompt that will allow you to experiment.
 
 To install this gem onto your local machine, run `bundle exec rake install`.
 
@@ -387,6 +389,13 @@ Run the example:
 
 ```bash
 bundle exec ruby examples/produce_and_consume.rb
+```
+
+## Integration Tests
+Run the integration tests with:
+
+```bash
+PULSAR_URL=pulsar://localhost:6650 bundle exec rake spec
 ```
 
 ## Contributing
