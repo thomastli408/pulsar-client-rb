@@ -96,6 +96,7 @@ module Pulsar
       end
 
       message_id, error = queue.pop
+      puts "[Producer] Sent message to topic '#{@topic}': #{message_id}, #{message.payload}" unless error
       raise error if error
 
       message_id

@@ -1,0 +1,116 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Example: Create a consumer and receive messages
+#
+# Usage:
+#   PULSAR_URL=pulsar://localhost:6650 bundle exec ruby examples/receive_message.rb
+#
+# To produce messages, run in another terminal:
+#   bundle exec ruby examples/send_message.rb
+
+require_relative "../lib/pulsar/client"
+
+pulsar_url = ENV.fetch("PULSAR_URL", "pulsar://localhost:6650")
+topic = ARGV[0] || "test-rb-driver-topic"
+subscription = ARGV[1] || "test-subscription"
+
+puts "Connecting to Pulsar at #{pulsar_url}..."
+
+# Create the required components
+service_url = Pulsar::Internal::ServiceUrl.new(pulsar_url)
+connection_pool = Pulsar::Internal::ConnectionPool.new
+lookup_service = Pulsar::Internal::LookupService.new(connection_pool, service_url)
+
+begin
+  message_count = 0
+
+  threads = []
+
+  threads << Thread.new do
+    producer = Pulsar::Producer.new(
+      connection_pool: connection_pool,
+      lookup_service: lookup_service,
+      topic: topic
+    )
+    puts "Producer created: #{producer.name}"
+
+    5.times do |i|
+      msg = Pulsar::ProducerMessage.new(payload: "Message #{i + 1} from producer")
+      mid = producer.send(msg)
+      puts "Sent message #{i + 1}: #{mid}"
+      sleep 1 + rand(3)
+    end
+  end
+
+  2.times do
+    threads << Thread.new do
+      consumer = Pulsar::Consumer.new(
+        connection_pool: connection_pool,
+        lookup_service: lookup_service,
+        topic: topic,
+        subscription: subscription,
+        options: {
+          subscription_type: :shared,
+          initial_position: :earliest
+        }
+      )
+      puts "Consumer created: #{consumer.consumer_id}"
+
+      loop do
+        # Receive with 5 second timeout
+        message = consumer.receive(timeout: nil)
+
+        if message.nil?
+          puts "No message received (timeout), waiting..."
+          next
+        end
+
+        message_count += 1
+
+        puts "=== Message #{message_count} Received by Consumer #{consumer.consumer_id} ==="
+        puts "  Message ID: #{message.message_id}"
+        puts "  Payload: #{message.data}"
+        puts "  Producer: #{message.producer_name}"
+        puts "  Publish Time: #{message.publish_time_as_time}"
+        puts "  Redelivery Count: #{message.redelivery_count}"
+
+        if message.properties.any?
+          puts "  Properties:"
+          message.properties.each do |key, value|
+            puts "    #{key}: #{value}"
+          end
+        end
+
+        if message.key
+          puts "  Key: #{message.key}"
+        end
+
+        # Acknowledge the message
+        consumer.acknowledge(message)
+        puts "  [ACKNOWLEDGED]"
+        puts ""
+      end
+    end
+  end
+
+  threads.each(&:join)
+
+rescue Interrupt
+  puts "\nShutting down..."
+rescue Pulsar::Error => e
+  puts "Pulsar error: #{e.message}"
+  exit 1
+rescue => e
+  puts "Error: #{e.class}: #{e.message}"
+  puts e.backtrace.first(10).join("\n")
+  exit 1
+ensure
+  if defined?(consumer) && consumer
+    puts "Closing consumer..."
+    consumer.close
+    puts "Consumer closed."
+  end
+  connection_pool.close_all
+  puts "Connection pool closed."
+end

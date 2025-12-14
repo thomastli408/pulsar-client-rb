@@ -13,6 +13,8 @@ require_relative "internal/lookup_service"
 require_relative "message_id"
 require_relative "producer_message"
 require_relative "producer"
+require_relative "message"
+require_relative "consumer"
 
 module Pulsar
   # Main module for the Pulsar Ruby client
