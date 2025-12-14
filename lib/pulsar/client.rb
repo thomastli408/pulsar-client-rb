@@ -15,6 +15,7 @@ require_relative "producer_message"
 require_relative "producer"
 require_relative "message"
 require_relative "consumer"
+require_relative "dlq_policy"
 
 module Pulsar
   # Client is the main entry point for interacting with a Pulsar cluster.
@@ -112,11 +113,13 @@ module Pulsar
     # @param subscription [String] subscription name
     # @param options [Hash] consumer options
     # @option options [Symbol] :subscription_type subscription type
-    #   (:shared, :exclusive, :failover) (default: :shared)
+    #   (:shared, :failover) (default: :shared)
     # @option options [Symbol] :initial_position where to start reading
     #   (:latest, :earliest) (default: :latest)
     # @option options [Integer] :receiver_queue_size max messages to prefetch (default: 1000)
     # @option options [String] :name consumer name (auto-generated if nil)
+    # @option options [DLQPolicy] :dlq_policy dead letter queue policy for handling
+    #   messages that fail processing after max redeliveries
     # @return [Consumer] the created consumer
     # @raise [ClientError] if client is closed
     # @raise [ConsumerError] if subscription fails
@@ -128,6 +131,7 @@ module Pulsar
         lookup_service: @lookup_service,
         topic: topic,
         subscription: subscription,
+        client: self,
         options: options
       )
 

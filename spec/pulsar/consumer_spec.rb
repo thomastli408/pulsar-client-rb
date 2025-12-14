@@ -224,6 +224,164 @@ RSpec.describe Pulsar::Consumer do
         expect(consumer.ready?).to be false
       end
     end
+
+    describe "#negative_acknowledge" do
+      it "sends redeliver command to broker" do
+        consumer = described_class.new(
+          connection_pool: connection_pool,
+          lookup_service: lookup_service,
+          topic: topic,
+          subscription: subscription
+        )
+
+        message_id = Pulsar::MessageId.new(ledger_id: 123, entry_id: 456)
+        message = Pulsar::Message.new(
+          message_id: message_id,
+          payload: "test",
+          topic: topic,
+          consumer_id: consumer.consumer_id,
+          producer_name: "producer",
+          publish_time: Time.now.to_i * 1000
+        )
+
+        expect(connection).to receive(:send_command) do |cmd|
+          expect(cmd.type).to eq(:REDELIVER_UNACKNOWLEDGED_MESSAGES)
+          expect(cmd.redeliverUnacknowledgedMessages.consumer_id).to eq(consumer.consumer_id)
+        end
+
+        consumer.negative_acknowledge(message)
+      end
+
+      it "raises error when consumer is closed" do
+        consumer = described_class.new(
+          connection_pool: connection_pool,
+          lookup_service: lookup_service,
+          topic: topic,
+          subscription: subscription
+        )
+        consumer.close
+
+        message_id = Pulsar::MessageId.new(ledger_id: 123, entry_id: 456)
+        message = Pulsar::Message.new(
+          message_id: message_id,
+          payload: "test",
+          topic: topic,
+          consumer_id: 1,
+          producer_name: "producer",
+          publish_time: Time.now.to_i * 1000
+        )
+
+        expect {
+          consumer.negative_acknowledge(message)
+        }.to raise_error(Pulsar::ConsumerError, /closed/)
+      end
+    end
+
+    describe "#nack" do
+      it "is an alias for negative_acknowledge" do
+        consumer = described_class.new(
+          connection_pool: connection_pool,
+          lookup_service: lookup_service,
+          topic: topic,
+          subscription: subscription
+        )
+
+        expect(consumer.method(:nack)).to eq(consumer.method(:negative_acknowledge))
+      end
+    end
+
+    describe "#send_to_dlq" do
+      it "raises error when DLQ policy not configured" do
+        consumer = described_class.new(
+          connection_pool: connection_pool,
+          lookup_service: lookup_service,
+          topic: topic,
+          subscription: subscription
+        )
+
+        message_id = Pulsar::MessageId.new(ledger_id: 123, entry_id: 456)
+        message = Pulsar::Message.new(
+          message_id: message_id,
+          payload: "test",
+          topic: topic,
+          consumer_id: 1,
+          producer_name: "producer",
+          publish_time: Time.now.to_i * 1000
+        )
+
+        expect {
+          consumer.send_to_dlq(message)
+        }.to raise_error(Pulsar::ConsumerError, /DLQ policy not configured/)
+      end
+    end
+
+    describe "with DLQ policy" do
+      let(:client) { instance_double(Pulsar::Client) }
+      let(:dlq_policy) { Pulsar::DLQPolicy.new(max_redeliveries: 3) }
+      let(:dlq_producer) { instance_double(Pulsar::Producer) }
+      let(:dlq_message_id) { Pulsar::MessageId.new(ledger_id: 789, entry_id: 101) }
+
+      before do
+        allow(client).to receive(:create_producer).and_return(dlq_producer)
+        allow(dlq_producer).to receive(:send).and_return(dlq_message_id)
+        allow(dlq_producer).to receive(:close)
+      end
+
+      it "requires client for DLQ support" do
+        expect {
+          described_class.new(
+            connection_pool: connection_pool,
+            lookup_service: lookup_service,
+            topic: topic,
+            subscription: subscription,
+            options: { dlq_policy: dlq_policy }
+          )
+        }.to raise_error(Pulsar::ConsumerError, /Client is required/)
+      end
+
+      it "creates consumer with DLQ policy when client provided" do
+        consumer = described_class.new(
+          connection_pool: connection_pool,
+          lookup_service: lookup_service,
+          topic: topic,
+          subscription: subscription,
+          client: client,
+          options: { dlq_policy: dlq_policy }
+        )
+
+        expect(consumer.ready?).to be true
+      end
+
+      it "send_to_dlq routes message and acknowledges" do
+        consumer = described_class.new(
+          connection_pool: connection_pool,
+          lookup_service: lookup_service,
+          topic: topic,
+          subscription: subscription,
+          client: client,
+          options: { dlq_policy: dlq_policy }
+        )
+
+        message_id = Pulsar::MessageId.new(ledger_id: 123, entry_id: 456)
+        message = Pulsar::Message.new(
+          message_id: message_id,
+          payload: "test",
+          topic: topic,
+          consumer_id: consumer.consumer_id,
+          producer_name: "producer",
+          publish_time: Time.now.to_i * 1000
+        )
+
+        # Expect ACK to be sent
+        expect(connection).to receive(:send_command) do |cmd|
+          expect(cmd.type).to eq(:ACK)
+        end
+
+        result = consumer.send_to_dlq(message)
+
+        expect(result).to eq(dlq_message_id)
+      end
+    end
   end
 
   # Integration tests require a running Pulsar broker

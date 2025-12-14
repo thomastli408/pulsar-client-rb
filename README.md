@@ -9,7 +9,9 @@ A pure Ruby client library for [Apache Pulsar](https://pulsar.apache.org/), the 
 - Pure Ruby implementation (no C++ bindings required)
 - Producer for sending messages to topics, supporting both standalone and partitioned topics
 - Consumer for receiving messages with subscription support
-- Multiple subscription types: Shared, Exclusive, Failover
+- Multiple subscription types: Shared, Failover
+- Negative acknowledgment (nack) for message redelivery
+- Dead Letter Queue (DLQ) support for poison message handling
 - Message properties and partition keys
 - Automatic connection management and keep-alive
 - Connection pooling for efficient resource usage
@@ -156,6 +158,106 @@ end
 
 # Close when done
 consumer.close
+```
+
+### Negative Acknowledgment (Nack)
+
+When message processing fails, use negative acknowledgment to trigger redelivery:
+
+```ruby
+consumer = client.subscribe("my-topic", "my-subscription", {
+  subscription_type: :shared,
+  initial_position: :earliest
+})
+
+loop do
+  message = consumer.receive(timeout: 10)
+  break if message.nil?
+
+  begin
+    process_message(message)
+    consumer.acknowledge(message)
+  rescue ProcessingError => e
+    puts "Failed to process (attempt #{message.redelivery_count + 1}): #{e.message}"
+    # Trigger redelivery - message will be sent to a consumer again
+    consumer.negative_acknowledge(message)
+    # or use the alias
+    # consumer.nack(message)
+  end
+end
+```
+
+### Dead Letter Queue (DLQ)
+
+Configure a Dead Letter Queue policy to automatically route messages that fail repeatedly:
+
+```ruby
+# Configure DLQ: after 3 failed attempts, send to dead letter topic
+dlq_policy = Pulsar::DLQPolicy.new(
+  max_redeliveries: 3,
+  dead_letter_topic: "my-topic-DLQ"  # Optional, auto-generated if nil
+)
+
+consumer = client.subscribe("my-topic", "my-subscription", {
+  subscription_type: :shared,
+  dlq_policy: dlq_policy
+})
+
+loop do
+  # Messages that have been nacked max_redeliveries times
+  # are automatically routed to the DLQ before being returned here
+  message = consumer.receive(timeout: 10)
+  break if message.nil?
+
+  begin
+    process_message(message)
+    consumer.acknowledge(message)
+  rescue ProcessingError => e
+    puts "Failed to process: #{e.message}"
+    consumer.negative_acknowledge(message)
+    # After 3 nacks, message goes to DLQ automatically
+  end
+end
+```
+
+#### Explicitly Send to DLQ
+
+For poison messages that should skip retries:
+
+```ruby
+message = consumer.receive(timeout: 10)
+
+if poison_message?(message)
+  # Immediately route to DLQ without retrying
+  consumer.send_to_dlq(message)
+else
+  # Normal processing...
+end
+```
+
+#### Processing DLQ Messages
+
+```ruby
+# Subscribe to the dead letter topic
+dlq_consumer = client.subscribe("my-topic-DLQ", "dlq-processor", {
+  subscription_type: :shared,
+  initial_position: :earliest
+})
+
+loop do
+  message = dlq_consumer.receive(timeout: 10)
+  break if message.nil?
+
+  puts "DLQ Message:"
+  puts "  Original topic: #{message.properties['PULSAR_DLQ_ORIGINAL_TOPIC']}"
+  puts "  Original message ID: #{message.properties['PULSAR_DLQ_ORIGINAL_MESSAGE_ID']}"
+  puts "  Redelivery count: #{message.properties['PULSAR_DLQ_REDELIVERY_COUNT']}"
+  puts "  Payload: #{message.data}"
+
+  # Handle poison message (log, alert, manual intervention, etc.)
+  handle_poison_message(message)
+  dlq_consumer.acknowledge(message)
+end
 ```
 
 ### Subscription Types
@@ -356,7 +458,6 @@ client.close
 
 ## Current Limitations
 
-- Negative acknowledgment (nack) is not yet implemented
 - TLS/SSL connections are not yet supported (only `pulsar://` URLs)
 - Async send is not yet exposed (internally used, but API is sync-only)
 - Reader API is not yet implemented

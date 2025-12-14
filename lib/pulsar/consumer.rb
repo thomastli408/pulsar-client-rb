@@ -4,6 +4,7 @@ require "timeout"
 
 require_relative "internal/commands"
 require_relative "internal/topic_name"
+require_relative "internal/dlq_router"
 require_relative "message"
 require_relative "message_id"
 require_relative "errors"
@@ -28,6 +29,11 @@ module Pulsar
   #     process(message)
   #     consumer.ack(message)
   #   end
+  #
+  #   # Negative acknowledge (triggers redelivery)
+  #   consumer.negative_acknowledge(message)
+  #   # or
+  #   consumer.nack(message)
   #
   #   consumer.close
   class Consumer
@@ -57,14 +63,17 @@ module Pulsar
     # @param lookup_service [Internal::LookupService] lookup service
     # @param topic [String] topic name
     # @param subscription [String] subscription name
+    # @param client [Pulsar::Client, nil] client instance (required for DLQ support)
     # @param options [Hash] consumer options
     # @option options [Symbol] :subscription_type subscription type (:shared)
     # @option options [Symbol] :initial_position initial position (:latest, :earliest)
     # @option options [Integer] :receiver_queue_size max messages to prefetch
     # @option options [String] :name consumer name (auto-generated if nil)
-    def initialize(connection_pool:, lookup_service:, topic:, subscription:, options: {})
+    # @option options [DLQPolicy] :dlq_policy dead letter queue policy
+    def initialize(connection_pool:, lookup_service:, topic:, subscription:, client: nil, options: {})
       @connection_pool = connection_pool
       @lookup_service = lookup_service
+      @client = client
       @topic_name = Internal::TopicName.new(topic)
       @topic = @topic_name.to_s
       @subscription = subscription
@@ -85,11 +94,19 @@ module Pulsar
       @available_permits = 0
       @permits_mutex = Mutex.new
 
+      # DLQ router (lazy initialized)
+      @dlq_router = nil
+      setup_dlq_router if @options[:dlq_policy]
+
       # Connect and subscribe
       connect_to_broker
     end
 
     # Receive next message (blocking with optional timeout)
+    #
+    # If DLQ policy is configured and a message has exceeded max redeliveries,
+    # it will be automatically routed to the dead letter topic and the next
+    # message will be returned instead.
     #
     # @param timeout [Integer, nil] timeout in seconds (nil = block forever)
     # @return [Message, nil] the received message, or nil if timeout
@@ -98,24 +115,16 @@ module Pulsar
     def receive(timeout: nil)
       ensure_ready!
 
-      if timeout.nil?
-        # Block forever
-        message = @message_queue.pop
-        replenish_permits_if_needed
-        message
-      else
-        # Block with timeout
-        begin
-          message = nil
-          Timeout.timeout(timeout, Pulsar::TimeoutError) do
-            message = @message_queue.pop
-          end
-          replenish_permits_if_needed
-          message
-        rescue Pulsar::TimeoutError
-          nil
-        end
+      message = internal_receive(timeout)
+      return nil if message.nil?
+
+      # Check if message should go to DLT
+      if @dlq_router&.should_route_to_dlq?(message)
+        handle_dlq_message(message)
+        return receive(timeout: timeout) # Get next message
       end
+
+      message
     end
 
     # Acknowledge message (remove from subscription)
@@ -151,6 +160,61 @@ module Pulsar
     # Alias for acknowledge_id
     alias ack_id acknowledge_id
 
+    # Negative acknowledge a message (trigger redelivery)
+    #
+    # The message will be redelivered to a consumer after a delay.
+    # The broker increments the redelivery_count. If DLQ policy is configured
+    # and redelivery_count reaches max_redeliveries, the message will be
+    # automatically routed to the dead letter topic on next receive.
+    #
+    # @param message [Message] message to negative acknowledge
+    # @return [void]
+    # @raise [ConsumerError] if consumer is closed
+    def negative_acknowledge(message)
+      ensure_ready!
+      negative_acknowledge_id(message.message_id)
+    end
+
+    # Alias for negative_acknowledge
+    alias nack negative_acknowledge
+
+    # Negative acknowledge by message ID
+    #
+    # @param message_id [MessageId] message ID to negative acknowledge
+    # @return [void]
+    # @raise [ConsumerError] if consumer is closed
+    def negative_acknowledge_id(message_id)
+      ensure_ready!
+
+      redeliver_cmd = Internal::Commands.redeliver_unacknowledged(
+        consumer_id: @consumer_id,
+        message_ids: [message_id.to_proto]
+      )
+
+      @connection.send_command(redeliver_cmd)
+    end
+
+    # Alias for negative_acknowledge_id
+    alias nack_id negative_acknowledge_id
+
+    # Explicitly send a message to the dead letter topic and acknowledge it
+    #
+    # Use this method to immediately route a message to the DLT without
+    # waiting for max redeliveries. Useful for poison messages that should
+    # not be retried.
+    #
+    # @param message [Message] message to send to DLT
+    # @return [MessageId] the message ID in the DLT
+    # @raise [ConsumerError] if DLQ policy not configured or consumer is closed
+    def send_to_dlq(message)
+      ensure_ready!
+      raise ConsumerError, "DLQ policy not configured" unless @dlq_router
+
+      dlq_message_id = @dlq_router.route_to_dlq(message)
+      acknowledge(message)
+      dlq_message_id
+    end
+
     # Close the consumer
     #
     # Releases resources and closes the consumer on the broker.
@@ -163,6 +227,9 @@ module Pulsar
         @closed = true
         @ready = false
       end
+
+      # Close DLQ router
+      @dlq_router&.close
 
       # Clear message queue
       @message_queue.clear
@@ -222,8 +289,56 @@ module Pulsar
         subscription_type: :shared,
         initial_position: :latest,
         receiver_queue_size: DEFAULT_RECEIVER_QUEUE_SIZE,
-        name: nil
+        name: nil,
+        dlq_policy: nil
       }
+    end
+
+    # Set up the DLQ router if policy is configured
+    def setup_dlq_router
+      policy = @options[:dlq_policy]
+      return unless policy
+
+      raise ConsumerError, "Client is required for DLQ support" unless @client
+
+      @dlq_router = Internal::DLQRouter.new(
+        client: @client,
+        policy: policy,
+        source_topic: @topic,
+        subscription: @subscription
+      )
+    end
+
+    # Handle a message that should go to the DLT
+    # @param message [Message] message to route to DLT
+    def handle_dlq_message(message)
+      puts "[Consumer] Routing message #{message.message_id} to DLQ (redelivery_count: #{message.redelivery_count})"
+      @dlq_router.route_to_dlq(message)
+      acknowledge(message) # Ack original to prevent further redelivery
+    end
+
+    # Internal receive implementation without DLQ handling
+    # @param timeout [Integer, nil] timeout in seconds
+    # @return [Message, nil]
+    def internal_receive(timeout)
+      if timeout.nil?
+        # Block forever
+        message = @message_queue.pop
+        replenish_permits_if_needed
+        message
+      else
+        # Block with timeout
+        begin
+          message = nil
+          Timeout.timeout(timeout, Pulsar::TimeoutError) do
+            message = @message_queue.pop
+          end
+          replenish_permits_if_needed
+          message
+        rescue Pulsar::TimeoutError
+          nil
+        end
+      end
     end
 
     # Generate a unique consumer ID
